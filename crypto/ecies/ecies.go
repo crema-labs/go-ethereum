@@ -35,13 +35,13 @@ import (
 	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/subtle"
-	"encoding/binary"
 	"errors"
 	"hash"
 	"io"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/crypto"
+	"golang.org/x/crypto/hkdf"
 )
 
 var (
@@ -144,34 +144,14 @@ var (
 	ErrInvalidMessage = errors.New("ecies: invalid message")
 )
 
-// NIST SP 800-56 Concatenation Key Derivation Function (see section 5.8.1).
-func concatKDF(hash hash.Hash, z, s1 []byte, kdLen int) []byte {
-	counterBytes := make([]byte, 4)
-	k := make([]byte, 0, roundup(kdLen, hash.Size()))
-	for counter := uint32(1); len(k) < kdLen; counter++ {
-		binary.BigEndian.PutUint32(counterBytes, counter)
-		hash.Reset()
-		hash.Write(counterBytes)
-		hash.Write(z)
-		hash.Write(s1)
-		k = hash.Sum(k)
-	}
-	return k[:kdLen]
-}
-
-// roundup rounds size up to the next multiple of blocksize.
-func roundup(size, blocksize int) int {
-	return size + blocksize - (size % blocksize)
-}
-
 // deriveKeys creates the encryption and MAC keys using concatKDF.
-func deriveKeys(hash hash.Hash, z, s1 []byte, keyLen int) (Ke, Km []byte) {
-	K := concatKDF(hash, z, s1, 2*keyLen)
-	Ke = K[:keyLen]
-	Km = K[keyLen:]
-	hash.Reset()
-	hash.Write(Km)
-	Km = hash.Sum(Km[:0])
+func deriveKeys(hash func() hash.Hash, z, s1 []byte, keyLen int) (Ke, Km []byte) {
+	K := hkdf.New(hash, z, nil, s1)
+	Ke = make([]byte, keyLen)
+	Km = make([]byte, keyLen)
+
+	K.Read(Ke)
+	K.Read(Km)
 	return Ke, Km
 }
 
@@ -247,7 +227,7 @@ func Encrypt(rand io.Reader, pub *PublicKey, m, s1, s2 []byte) (ct []byte, err e
 		return nil, err
 	}
 
-	hash := params.Hash()
+	hash := params.Hash
 	Ke, Km := deriveKeys(hash, z, s1, params.KeyLen)
 
 	em, err := symEncrypt(rand, params, Ke, m)
@@ -313,7 +293,7 @@ func (prv *PrivateKey) Decrypt(c, s1, s2 []byte) (m []byte, err error) {
 		if err != nil {
 			return nil, err
 		}
-		Ke, Km := deriveKeys(hash, z, s1, params.KeyLen)
+		Ke, Km := deriveKeys(params.Hash, z, s1, params.KeyLen)
 
 		d := messageTag(params.Hash, Km, c[mStart:mEnd], s2)
 		if subtle.ConstantTimeCompare(c[mEnd:], d) != 1 {
